@@ -9,11 +9,7 @@ from PIL import Image
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-try:
-    import tflite_runtime.interpreter as tflite
-except ImportError:
-    import tensorflow as tf
-    tflite = tf.lite
+import ai_edge_litert.interpreter as tflite
 # ============================================================
 # CONFIG
 # ============================================================
