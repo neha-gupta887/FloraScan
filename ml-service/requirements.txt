@@ -3,4 +3,4 @@ uvicorn[standard]
 numpy
 pillow
 python-multipart
-tflite-runtime
+ai-edge-litert
