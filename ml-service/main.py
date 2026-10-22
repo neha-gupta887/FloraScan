@@ -1,23 +1,8 @@
 import os
-
-# ============================================================
-# ENVIRONMENT / MEMORY SETTINGS
-# ============================================================
-
-# Reduce TensorFlow logging
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
-# Render par GPU available nahi hai
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-
-
-# ============================================================
-# IMPORTS
-# ============================================================
-
 import json
 import urllib.request
 from pathlib import Path
+from io import BytesIO
 
 import numpy as np
 from PIL import Image
@@ -25,17 +10,39 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 import tensorflow as tf
-from tensorflow.keras.layers import Dense
 
 
 # ============================================================
-# FASTAPI APP
+# CONFIG
+# ============================================================
+
+MODEL_URL = os.getenv(
+    "MODEL_URL",
+    "https://huggingface.co/nehag65/florascan-model/"
+    "resolve/main/florascan_model.tflite?download=true"
+)
+
+ML_SERVICE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = ML_SERVICE_DIR.parent
+
+CACHE_DIR = ML_SERVICE_DIR / ".cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+MODEL_PATH = CACHE_DIR / "florascan_model.tflite"
+
+CLASS_NAMES_PATH = (
+    PROJECT_ROOT / "disease_data" / "class_names.json"
+)
+
+
+# ============================================================
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
     title="FloraScan AI API",
-    description="Plant disease detection API powered by TensorFlow",
-    version="1.0.0"
+    description="Lightweight plant disease detection API",
+    version="2.0.0"
 )
 
 
@@ -63,72 +70,11 @@ app.add_middleware(
 
 
 # ============================================================
-# PATHS
+# GLOBALS
 # ============================================================
 
-# ml-service/
-ML_SERVICE_DIR = Path(__file__).resolve().parent
-
-# Project root/
-PROJECT_ROOT = ML_SERVICE_DIR.parent
-
-# Possible local model locations
-LOCAL_MODEL_PATHS = [
-    PROJECT_ROOT / "model" / "trained_model.keras",
-    PROJECT_ROOT / "trained_model.keras",
-]
-
-# Cached downloaded model
-CACHE_DIR = ML_SERVICE_DIR / ".cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-CACHED_MODEL_PATH = CACHE_DIR / "trained_model.keras"
-
-# Hugging Face model
-DEFAULT_MODEL_URL = (
-    "https://huggingface.co/nehag65/florascan-model/"
-    "resolve/main/trained_model.keras?download=true"
-)
-
-MODEL_URL = os.getenv("MODEL_URL", DEFAULT_MODEL_URL)
-
-# Class names
-CLASS_NAMES_PATH = (
-    PROJECT_ROOT / "disease_data" / "class_names.json"
-)
-
-
-# ============================================================
-# MODEL VARIABLES
-# ============================================================
-
-model = None
+interpreter = None
 class_names = []
-
-
-# ============================================================
-# KERAS COMPATIBILITY FIX
-# ============================================================
-
-# Some saved Keras models contain:
-# "quantization_config": None
-#
-# Older/current Dense implementation can reject this argument.
-# Remove it before Dense configuration is created.
-
-_original_dense_from_config = Dense.from_config
-
-
-@classmethod
-def _compatible_dense_from_config(cls, config):
-    config = dict(config)
-
-    config.pop("quantization_config", None)
-
-    return _original_dense_from_config(config)
-
-
-Dense.from_config = _compatible_dense_from_config
 
 
 # ============================================================
@@ -136,156 +82,152 @@ Dense.from_config = _compatible_dense_from_config
 # ============================================================
 
 def load_class_names():
+
     global class_names
 
     if not CLASS_NAMES_PATH.exists():
         raise FileNotFoundError(
-            f"class_names.json not found at: {CLASS_NAMES_PATH}"
+            f"class_names.json not found: "
+            f"{CLASS_NAMES_PATH}"
         )
 
-    with open(CLASS_NAMES_PATH, "r", encoding="utf-8") as f:
+    with open(
+        CLASS_NAMES_PATH,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
         data = json.load(f)
 
-    # Support both:
-    # ["Apple___Apple_scab", ...]
-    #
-    # and:
-    # {"0": "Apple___Apple_scab", ...}
-
     if isinstance(data, list):
+
         class_names = data
 
     elif isinstance(data, dict):
-        # Sort numeric keys if possible
+
         try:
+
             sorted_items = sorted(
                 data.items(),
                 key=lambda item: int(item[0])
             )
-            class_names = [value for _, value in sorted_items]
+
+            class_names = [
+                value
+                for _, value in sorted_items
+            ]
+
         except (ValueError, TypeError):
+
             class_names = list(data.values())
 
     else:
+
         raise ValueError(
             "Unsupported class_names.json format."
         )
 
     if not class_names:
+
         raise ValueError(
             "class_names.json is empty."
         )
 
 
 # ============================================================
-# FIND / DOWNLOAD MODEL
+# DOWNLOAD MODEL
 # ============================================================
 
-def get_model_path():
-    # --------------------------------------------------------
-    # 1. Check local model
-    # --------------------------------------------------------
+def download_model():
 
-    for path in LOCAL_MODEL_PATHS:
-        if path.exists():
-            print(f"Using local model: {path}")
-            return path
+    if MODEL_PATH.exists():
 
-    # --------------------------------------------------------
-    # 2. Check cached model
-    # --------------------------------------------------------
-
-    if CACHED_MODEL_PATH.exists():
         print(
-            f"Using cached Hugging Face model: "
-            f"{CACHED_MODEL_PATH}"
+            f"Using cached TFLite model: {MODEL_PATH}"
         )
-        return CACHED_MODEL_PATH
 
-    # --------------------------------------------------------
-    # 3. Download from Hugging Face
-    # --------------------------------------------------------
+        return
 
-    print("Local model not found.")
-    print("Downloading model from Hugging Face...")
-    print(f"Model URL: {MODEL_URL}")
+    print("TFLite model not found locally.")
+    print("Downloading from Hugging Face...")
+    print(f"URL: {MODEL_URL}")
 
     try:
+
         urllib.request.urlretrieve(
             MODEL_URL,
-            CACHED_MODEL_PATH
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to download model from Hugging Face: {e}"
+            MODEL_PATH
         )
 
-    if not CACHED_MODEL_PATH.exists():
+    except Exception as e:
+
         raise RuntimeError(
-            "Model download completed but file was not found."
+            f"Failed to download TFLite model: {e}"
+        )
+
+    if not MODEL_PATH.exists():
+
+        raise RuntimeError(
+            "Model download failed."
         )
 
     print(
-        f"Model downloaded successfully: "
-        f"{CACHED_MODEL_PATH}"
+        f"Model downloaded successfully: {MODEL_PATH}"
     )
-
-    return CACHED_MODEL_PATH
 
 
 # ============================================================
-# LOAD MODEL
+# LOAD TFLITE MODEL
 # ============================================================
 
 def load_model():
-    global model
 
-    model_path = get_model_path()
+    global interpreter
 
-    print("Loading TensorFlow/Keras model...")
-    print(f"Model path: {model_path}")
+    download_model()
 
-    # IMPORTANT:
-    # compile=False avoids unnecessary optimizer/training
-    # objects and reduces memory usage during startup.
+    print("Loading TFLite interpreter...")
 
-    model = tf.keras.models.load_model(
-        model_path,
-        compile=False
+    interpreter = tf.lite.Interpreter(
+        model_path=str(MODEL_PATH),
+        num_threads=2
     )
 
-    print("Model loaded successfully.")
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+
+    print(
+        "Input shape:",
+        input_details[0]["shape"]
+    )
+
+    print(
+        "Output shape:",
+        output_details[0]["shape"]
+    )
 
     # Validate output classes
-    try:
-        output_shape = model.output_shape
 
-        if isinstance(output_shape, list):
-            output_shape = output_shape[0]
+    output_shape = output_details[0]["shape"]
 
-        model_class_count = output_shape[-1]
+    model_class_count = int(
+        output_shape[-1]
+    )
 
-        print(
-            f"Model output classes: "
-            f"{model_class_count}"
+    if model_class_count != len(class_names):
+
+        raise ValueError(
+            f"Model has {model_class_count} classes "
+            f"but class_names.json has "
+            f"{len(class_names)} classes."
         )
 
-        print(
-            f"Class names count: "
-            f"{len(class_names)}"
-        )
-
-        if model_class_count != len(class_names):
-            raise ValueError(
-                f"Model has {model_class_count} outputs, "
-                f"but class_names.json has "
-                f"{len(class_names)} classes."
-            )
-
-    except Exception as e:
-        print(
-            f"Warning while validating model output: {e}"
-        )
+    print(
+        f"TFLite model loaded successfully "
+        f"with {model_class_count} classes."
+    )
 
 
 # ============================================================
@@ -294,12 +236,17 @@ def load_model():
 
 @app.on_event("startup")
 def startup_event():
+
+    global interpreter
+
     print("=" * 60)
     print("Starting FloraScan AI API")
     print("=" * 60)
 
     try:
+
         load_class_names()
+
         print(
             f"Loaded {len(class_names)} class names."
         )
@@ -307,71 +254,69 @@ def startup_event():
         load_model()
 
         print("=" * 60)
-        print("FloraScan AI API is ready!")
+        print("FloraScan AI API is READY!")
         print("=" * 60)
 
     except Exception as e:
+
         print("=" * 60)
-        print("MODEL STARTUP ERROR")
-        print("=" * 60)
-        print(str(e))
+        print("STARTUP ERROR")
         print("=" * 60)
 
-        # Keep server alive so /health can report failure
-        model = None
+        print(str(e))
+
+        print("=" * 60)
+
+        interpreter = None
 
 
 # ============================================================
-# ROOT ENDPOINT
+# ROOT
 # ============================================================
 
 @app.get("/")
 def root():
+
     return {
         "name": "FloraScan AI API",
+        "version": "2.0.0",
         "status": "running",
-        "modelLoaded": model is not None
+        "modelLoaded": interpreter is not None
     }
 
 
 # ============================================================
-# HEALTH ENDPOINT
+# HEALTH
 # ============================================================
 
 @app.get("/health")
 def health():
+
     return {
-        "status": "healthy" if model is not None else "unhealthy",
-        "modelLoaded": model is not None,
+        "status": (
+            "healthy"
+            if interpreter is not None
+            else "unhealthy"
+        ),
+        "modelLoaded": interpreter is not None,
         "classCount": len(class_names)
     }
 
 
 # ============================================================
-# PREDICTION ENDPOINT
+# PREDICT
 # ============================================================
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(
+    file: UploadFile = File(...)
+):
 
-    # --------------------------------------------------------
-    # Check model
-    # --------------------------------------------------------
+    if interpreter is None:
 
-    if model is None:
         raise HTTPException(
             status_code=503,
             detail="Model is not loaded."
-        )
-
-    # --------------------------------------------------------
-    # Validate file
-    # --------------------------------------------------------
-
-    if not file.content_type:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid file type."
         )
 
     allowed_types = {
@@ -382,41 +327,42 @@ async def predict(file: UploadFile = File(...)):
     }
 
     if file.content_type not in allowed_types:
+
         raise HTTPException(
             status_code=400,
             detail=(
-                "Please upload a JPG, JPEG, PNG, "
-                "or WEBP image."
+                "Please upload a JPG, JPEG, "
+                "PNG, or WEBP image."
             )
         )
 
-    # --------------------------------------------------------
-    # Read image
-    # --------------------------------------------------------
-
     try:
+
         image_bytes = await file.read()
 
         image = Image.open(
-            __import__("io").BytesIO(image_bytes)
+            BytesIO(image_bytes)
         )
 
         image = image.convert("RGB")
 
     except Exception:
+
         raise HTTPException(
             status_code=400,
-            detail="Could not read the uploaded image."
+            detail="Could not read uploaded image."
         )
 
     # --------------------------------------------------------
     # Resize
     # --------------------------------------------------------
 
-    image = image.resize((128, 128))
+    image = image.resize(
+        (128, 128)
+    )
 
     # --------------------------------------------------------
-    # Convert to NumPy
+    # NumPy
     # --------------------------------------------------------
 
     image_array = np.array(
@@ -424,15 +370,7 @@ async def predict(file: UploadFile = File(...)):
         dtype=np.float32
     )
 
-    # --------------------------------------------------------
-    # Normalize
-    # --------------------------------------------------------
-
-    image_array = image_array / 255.0
-
-    # --------------------------------------------------------
-    # Add batch dimension
-    # --------------------------------------------------------
+    image_array /= 255.0
 
     image_array = np.expand_dims(
         image_array,
@@ -440,23 +378,51 @@ async def predict(file: UploadFile = File(...)):
     )
 
     # --------------------------------------------------------
+    # TFLite input/output
+    # --------------------------------------------------------
+
+    input_details = (
+        interpreter.get_input_details()
+    )
+
+    output_details = (
+        interpreter.get_output_details()
+    )
+
+    input_index = (
+        input_details[0]["index"]
+    )
+
+    output_index = (
+        output_details[0]["index"]
+    )
+
+    # --------------------------------------------------------
     # Prediction
     # --------------------------------------------------------
 
     try:
-        predictions = model.predict(
-            image_array,
-            verbose=0
+
+        interpreter.set_tensor(
+            input_index,
+            image_array
+        )
+
+        interpreter.invoke()
+
+        predictions = interpreter.get_tensor(
+            output_index
         )
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=f"Prediction failed: {str(e)}"
         )
 
     # --------------------------------------------------------
-    # Get probabilities
+    # Main prediction
     # --------------------------------------------------------
 
     probabilities = np.asarray(
@@ -471,25 +437,12 @@ async def predict(file: UploadFile = File(...)):
         probabilities[predicted_index]
     )
 
-    # --------------------------------------------------------
-    # Get disease/class name
-    # --------------------------------------------------------
-
-    if predicted_index >= len(class_names):
-        raise HTTPException(
-            status_code=500,
-            detail="Predicted class index is invalid."
-        )
-
     predicted_class = class_names[
         predicted_index
     ]
 
     # --------------------------------------------------------
-    # Split plant and disease
-    #
-    # Example:
-    # Tomato___Late_blight
+    # Plant + condition
     # --------------------------------------------------------
 
     if "___" in predicted_class:
@@ -506,12 +459,18 @@ async def predict(file: UploadFile = File(...)):
         plant_name = predicted_class
         disease_name = predicted_class
 
-    # Make names user-friendly
-    plant_name = plant_name.replace("_", " ")
-    disease_name = disease_name.replace("_", " ")
+    plant_name = plant_name.replace(
+        "_",
+        " "
+    )
+
+    disease_name = disease_name.replace(
+        "_",
+        " "
+    )
 
     # --------------------------------------------------------
-    # Return only MAIN diagnosis
+    # Response
     # --------------------------------------------------------
 
     return {
