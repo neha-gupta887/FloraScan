@@ -9,9 +9,11 @@ from PIL import Image
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-import tensorflow as tf
-
-
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    import tensorflow as tf
+    tflite = tf.lite
 # ============================================================
 # CONFIG
 # ============================================================
@@ -188,10 +190,10 @@ def load_model():
 
     print("Loading TFLite interpreter...")
 
-    interpreter = tf.lite.Interpreter(
-        model_path=str(MODEL_PATH),
-        num_threads=2
-    )
+    interpreter = tflite.Interpreter(
+    model_path=str(MODEL_PATH),
+    num_threads=2
+)
 
     interpreter.allocate_tensors()
 
