@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import urllib.request
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -44,11 +45,39 @@ PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
 
-MODEL_PATH = os.path.join(
-    PROJECT_ROOT,
+ML_SERVICE_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# Local model locations
+LOCAL_MODEL_PATHS = [
+    os.path.join(
+        PROJECT_ROOT,
+        "model",
+        "trained_model.keras"
+    ),
+    os.path.join(
+        PROJECT_ROOT,
+        "trained_model.keras"
+    ),
+]
+
+# Downloaded model location for deployment
+CACHE_DIR = os.path.join(
+    ML_SERVICE_ROOT,
+    ".cache"
+)
+
+DOWNLOADED_MODEL_PATH = os.path.join(
+    CACHE_DIR,
     "trained_model.keras"
 )
 
+# Hugging Face model
+MODEL_URL = os.getenv(
+    "MODEL_URL",
+    "https://huggingface.co/nehag65/florascan-model/resolve/main/trained_model.keras?download=true"
+)
+
+# Class names
 CLASS_NAMES_PATH = os.path.join(
     PROJECT_ROOT,
     "disease_data",
@@ -61,7 +90,10 @@ CLASS_NAMES_PATH = os.path.join(
 # ============================================================
 
 PREDICTION_CONFIDENCE_THRESHOLD = float(
-    os.getenv("PREDICTION_CONFIDENCE_THRESHOLD", "0.50")
+    os.getenv(
+        "PREDICTION_CONFIDENCE_THRESHOLD",
+        "0.50"
+    )
 )
 
 
@@ -74,22 +106,121 @@ ml_class_names = []
 
 
 # ============================================================
+# FIND / DOWNLOAD MODEL
+# ============================================================
+
+def get_model_path():
+    """
+    Use the local model if available.
+    Otherwise download it from Hugging Face.
+    """
+
+    # --------------------------------------------------------
+    # 1. Check local model
+    # --------------------------------------------------------
+
+    for path in LOCAL_MODEL_PATHS:
+
+        if os.path.exists(path):
+
+            print(
+                f"SUCCESS: Local model found at: {path}"
+            )
+
+            return path
+
+    # --------------------------------------------------------
+    # 2. Check cached downloaded model
+    # --------------------------------------------------------
+
+    if os.path.exists(DOWNLOADED_MODEL_PATH):
+
+        print(
+            "SUCCESS: Cached Hugging Face model found at: "
+            f"{DOWNLOADED_MODEL_PATH}"
+        )
+
+        return DOWNLOADED_MODEL_PATH
+
+    # --------------------------------------------------------
+    # 3. Download from Hugging Face
+    # --------------------------------------------------------
+
+    print(
+        "Local model not found."
+    )
+
+    print(
+        "Downloading FloraScan model from Hugging Face..."
+    )
+
+    print(
+        f"Model URL: {MODEL_URL}"
+    )
+
+    try:
+
+        os.makedirs(
+            CACHE_DIR,
+            exist_ok=True
+        )
+
+        urllib.request.urlretrieve(
+            MODEL_URL,
+            DOWNLOADED_MODEL_PATH
+        )
+
+        if not os.path.exists(
+            DOWNLOADED_MODEL_PATH
+        ):
+
+            raise RuntimeError(
+                "Model download completed but file was not found."
+            )
+
+        file_size_mb = (
+            os.path.getsize(
+                DOWNLOADED_MODEL_PATH
+            )
+            / (1024 * 1024)
+        )
+
+        print(
+            f"SUCCESS: Model downloaded. "
+            f"Size: {file_size_mb:.2f} MB"
+        )
+
+        return DOWNLOADED_MODEL_PATH
+
+    except Exception as e:
+
+        print(
+            f"ERROR downloading model: {e}"
+        )
+
+        return None
+
+
+# ============================================================
 # APPLICATION LIFESPAN
 # ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    global ml_model, ml_class_names
+    global ml_model
+    global ml_class_names
 
     # --------------------------------------------------------
     # Load Model
     # --------------------------------------------------------
 
-    if not os.path.exists(MODEL_PATH):
+    model_path = get_model_path()
+
+    if model_path is None:
 
         print(
-            f"ERROR: Model file not found at {MODEL_PATH}"
+            "ERROR: Could not find or download model."
         )
 
     else:
@@ -97,15 +228,15 @@ async def lifespan(app: FastAPI):
         try:
 
             print(
-                f"Loading model from: {MODEL_PATH}"
+                f"Loading model from: {model_path}"
             )
 
             ml_model = tf.keras.models.load_model(
-                MODEL_PATH
+                model_path
             )
 
             print(
-                f"SUCCESS: Model loaded from {MODEL_PATH}"
+                "SUCCESS: FloraScan model loaded."
             )
 
         except Exception as e:
@@ -118,10 +249,12 @@ async def lifespan(app: FastAPI):
     # Load Class Names
     # --------------------------------------------------------
 
-    if not os.path.exists(CLASS_NAMES_PATH):
+    if not os.path.exists(
+        CLASS_NAMES_PATH
+    ):
 
         print(
-            f"ERROR: Class names file not found at "
+            "ERROR: Class names file not found at: "
             f"{CLASS_NAMES_PATH}"
         )
 
@@ -151,7 +284,10 @@ async def lifespan(app: FastAPI):
     # Validate Model + Classes
     # --------------------------------------------------------
 
-    if ml_model is not None and ml_class_names:
+    if (
+        ml_model is not None
+        and ml_class_names
+    ):
 
         if len(ml_class_names) != 38:
 
@@ -178,10 +314,17 @@ async def lifespan(app: FastAPI):
                     f"({model_output_classes})."
                 )
 
+            else:
+
+                print(
+                    f"SUCCESS: Model output matches "
+                    f"{model_output_classes} classes."
+                )
+
         except Exception as e:
 
             print(
-                f"WARNING: Could not validate "
+                "WARNING: Could not validate "
                 f"model output shape: {e}"
             )
 
@@ -200,7 +343,7 @@ async def lifespan(app: FastAPI):
 # ============================================================
 
 app = FastAPI(
-    title="Plant Disease ML Service",
+    title="FloraScan Plant Disease Detection API",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -210,13 +353,27 @@ app = FastAPI(
 # CORS
 # ============================================================
 
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    ""
+)
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+if FRONTEND_URL:
+
+    allowed_origins.append(
+        FRONTEND_URL.rstrip("/")
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
 
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
-    ],
+    allow_origins=allowed_origins,
 
     allow_credentials=True,
 
@@ -224,6 +381,20 @@ app.add_middleware(
 
     allow_headers=["*"],
 )
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+async def root():
+
+    return {
+        "name": "FloraScan",
+        "service": "Plant Disease Detection API",
+        "status": "running"
+    }
 
 
 # ============================================================
@@ -243,13 +414,17 @@ async def health_check():
         return {
             "status": "unhealthy",
             "modelLoaded": False,
-            "classCount": len(ml_class_names)
+            "classCount": len(
+                ml_class_names
+            )
         }
 
     return {
         "status": "healthy",
         "modelLoaded": True,
-        "classCount": len(ml_class_names)
+        "classCount": len(
+            ml_class_names
+        )
     }
 
 
@@ -273,7 +448,9 @@ async def predict(
             detail="File type could not be determined."
         )
 
-    if not file.content_type.startswith("image/"):
+    if not file.content_type.startswith(
+        "image/"
+    ):
 
         raise HTTPException(
             status_code=400,
@@ -312,7 +489,9 @@ async def predict(
 
         if image.mode != "RGB":
 
-            image = image.convert("RGB")
+            image = image.convert(
+                "RGB"
+            )
 
         # ----------------------------------------------------
         # Resize
@@ -326,7 +505,9 @@ async def predict(
         # Convert to NumPy
         # ----------------------------------------------------
 
-        input_arr = np.array(image)
+        input_arr = np.array(
+            image
+        )
 
         # Handle RGBA images
         if (
@@ -365,10 +546,13 @@ async def predict(
 
             top_predictions.append(
                 {
-                    "className": ml_class_names[i],
-                    "confidence": float(
-                        prediction[0][i]
-                    )
+                    "className":
+                        ml_class_names[i],
+
+                    "confidence":
+                        float(
+                            prediction[0][i]
+                        )
                 }
             )
 
@@ -377,7 +561,9 @@ async def predict(
         # ----------------------------------------------------
 
         predicted_index = int(
-            np.argmax(prediction[0])
+            np.argmax(
+                prediction[0]
+            )
         )
 
         max_confidence = float(
@@ -385,7 +571,9 @@ async def predict(
         )
 
         predicted_class = (
-            ml_class_names[predicted_index]
+            ml_class_names[
+                predicted_index
+            ]
         )
 
         # ----------------------------------------------------
@@ -398,7 +586,9 @@ async def predict(
         ):
 
             return JSONResponse(
+
                 content={
+
                     "status": "uncertain",
 
                     "message":
@@ -421,7 +611,9 @@ async def predict(
         # ----------------------------------------------------
 
         return JSONResponse(
+
             content={
+
                 "status": "success",
 
                 "predictedClass":
@@ -448,9 +640,11 @@ async def predict(
         )
 
         return JSONResponse(
+
             status_code=500,
 
             content={
+
                 "error":
                     "Prediction service failed "
                     "while analyzing the image."
