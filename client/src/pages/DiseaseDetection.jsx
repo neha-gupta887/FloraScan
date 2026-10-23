@@ -17,8 +17,7 @@ import {
   ScanLine,
 } from "lucide-react";
 
-const API_URL = "http://localhost:8000";
-
+const API_URL = "https://florascan-api-y534.onrender.com";
 const DiseaseDetection = () => {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -116,7 +115,6 @@ const DiseaseDetection = () => {
     try {
       const formData = new FormData();
 
-      // IMPORTANT:
       // FastAPI expects the field name "file"
       formData.append("file", file);
 
@@ -136,51 +134,41 @@ const DiseaseDetection = () => {
       const data = response.data;
 
       // ----------------------------------------
-      // GET PREDICTED CLASS
+      // GET PREDICTION FROM FASTAPI
+      // Backend response:
+      // {
+      //   "plant": "Tomato",
+      //   "condition": "Late blight",
+      //   "confidence": 0.0566
+      // }
       // ----------------------------------------
-      const predictedClass =
-        data.predictedClass ||
-        data.predicted_class ||
-        data.class_name ||
-        data.prediction ||
-        "";
+      const plantFromAPI = data.plant || "";
+      const diseaseFromAPI = data.condition || "";
 
-      if (!predictedClass) {
+      if (!diseaseFromAPI) {
         throw new Error("Prediction was not returned by the AI model.");
       }
 
       // ----------------------------------------
-      // SPLIT plant___disease
+      // PLANT
       // ----------------------------------------
-      let plant = "Unknown Plant";
-      let disease = predictedClass;
-
-      if (predictedClass.includes("___")) {
-        const parts = predictedClass.split("___");
-
-        plant = parts[0]
+      const plant =
+        plantFromAPI
           .replace(/_/g, " ")
-          .replace(/\b\w/g, (char) => char.toUpperCase());
-
-        disease = parts
-          .slice(1)
-          .join(" ")
-          .replace(/_/g, " ")
-          .replace(/\b\w/g, (char) => char.toUpperCase());
-      } else {
-        disease = predictedClass
-          .replace(/_/g, " ")
-          .replace(/\b\w/g, (char) => char.toUpperCase());
-      }
+          .replace(/\b\w/g, (char) => char.toUpperCase()) ||
+        "Unknown Plant";
 
       // ----------------------------------------
-      // CONFIDENCE FIX
+      // DISEASE / CONDITION
       // ----------------------------------------
-      let rawConfidence =
-        data.confidence ??
-        data.confidence_score ??
-        data.probability ??
-        data.score;
+      const disease = diseaseFromAPI
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+
+      // ----------------------------------------
+      // CONFIDENCE
+      // ----------------------------------------
+      let rawConfidence = data.confidence;
 
       let confidence = Number(rawConfidence);
 
@@ -189,13 +177,14 @@ const DiseaseDetection = () => {
       }
 
       /*
-        Backend can return either:
+        Backend returns confidence as decimal:
 
-        0.7471  -> 74.71%
-        OR
-        74.71   -> 74.71%
+        0.0566 -> 5.66%
 
-        So we handle both safely.
+        If backend ever returns:
+        5.66 -> 5.66%
+
+        We handle both safely.
       */
       if (confidence >= 0 && confidence <= 1) {
         confidence = confidence * 100;
@@ -396,7 +385,10 @@ const DiseaseDetection = () => {
       {/* ======================================
           SCANNER
       ====================================== */}
-      <section id="scanner" className="bg-slate-50 px-5 py-16 sm:px-8 lg:py-24">
+      <section
+        id="scanner"
+        className="bg-slate-50 px-5 py-16 sm:px-8 lg:py-24"
+      >
         <div className="mx-auto max-w-7xl">
 
           <div className="mx-auto mb-12 max-w-2xl text-center">
@@ -583,6 +575,7 @@ const DiseaseDetection = () => {
                 <div className="flex min-h-[500px] flex-col items-center justify-center rounded-2xl bg-slate-50">
                   <div className="relative flex h-24 w-24 items-center justify-center">
                     <div className="absolute inset-0 animate-ping rounded-full bg-emerald-100" />
+
                     <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-emerald-600">
                       <ScanLine className="h-9 w-9 text-white" />
                     </div>
@@ -605,6 +598,7 @@ const DiseaseDetection = () => {
                     animate={{ opacity: 1, y: 0 }}
                     className="space-y-4"
                   >
+
                     {/* Detection complete */}
                     <div className="flex items-center gap-4 rounded-2xl bg-amber-50 p-5">
                       <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-orange-500">
@@ -697,6 +691,7 @@ const DiseaseDetection = () => {
                       <RotateCcw className="h-5 w-5" />
                       Scan Another Leaf
                     </button>
+
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -708,7 +703,10 @@ const DiseaseDetection = () => {
       {/* ======================================
           TIPS
       ====================================== */}
-      <section id="tips" className="bg-white px-5 py-16 sm:px-8 lg:py-24">
+      <section
+        id="tips"
+        className="bg-white px-5 py-16 sm:px-8 lg:py-24"
+      >
         <div className="mx-auto max-w-7xl">
 
           <div className="mb-10 text-center">
@@ -820,7 +818,9 @@ const DiseaseDetection = () => {
             </div>
 
             <div>
-              <h5 className="font-extrabold">Quick Links</h5>
+              <h5 className="font-extrabold">
+                Quick Links
+              </h5>
 
               <div className="mt-4 space-y-3 text-sm text-slate-400">
                 <a
@@ -847,7 +847,9 @@ const DiseaseDetection = () => {
             </div>
 
             <div>
-              <h5 className="font-extrabold">Credits</h5>
+              <h5 className="font-extrabold">
+                Credits
+              </h5>
 
               <div className="mt-4 space-y-3 text-sm text-slate-400">
                 <p>
@@ -871,6 +873,7 @@ const DiseaseDetection = () => {
           <div className="mt-10 border-t border-white/10 pt-6 text-center text-xs text-slate-500">
             © {new Date().getFullYear()} FloraScan. All rights reserved.
           </div>
+
         </div>
       </footer>
     </div>
