@@ -17,7 +17,7 @@ import {
   ScanLine,
 } from "lucide-react";
 
-const API_URL = "http://localhost:8000";
+const API_URL = "https://florascan-api-y534.onrender.com";
 const DiseaseDetection = () => {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
