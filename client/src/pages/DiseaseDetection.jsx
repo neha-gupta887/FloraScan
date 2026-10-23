@@ -17,7 +17,7 @@ import {
   ScanLine,
 } from "lucide-react";
 
-const API_URL = "https://florascan-api-y534.onrender.com";
+const API_URL = "http://localhost:8000";
 const DiseaseDetection = () => {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -135,17 +135,65 @@ const DiseaseDetection = () => {
 
       // ----------------------------------------
       // GET PREDICTION FROM FASTAPI
-      // Backend response:
-      // {
-      //   "plant": "Tomato",
-      //   "condition": "Late blight",
-      //   "confidence": 0.0566
-      // }
+      // Backend response can contain:
+      // plant, condition, confidence, is_healthy,
+      // health_status and top_predictions.
       // ----------------------------------------
       const plantFromAPI = data.plant || "";
       const diseaseFromAPI = data.condition || "";
 
-      if (!diseaseFromAPI) {
+      // ----------------------------------------
+      // CONFIDENCE
+      // ----------------------------------------
+      let confidence = Number(data.confidence);
+
+      if (Number.isNaN(confidence)) {
+        confidence = 0;
+      }
+
+      // Backend normally returns decimal confidence (0-1).
+      // Safely handle percentage values too.
+      if (confidence >= 0 && confidence <= 1) {
+        confidence = confidence * 100;
+      }
+
+      confidence = Math.min(100, Math.max(0, confidence));
+
+      // ----------------------------------------
+      // TOP 3 PREDICTIONS
+      // ----------------------------------------
+      const topPredictions = (data.top_predictions || []).map((item) => {
+        let itemConfidence = Number(item.confidence || 0);
+
+        if (itemConfidence >= 0 && itemConfidence <= 1) {
+          itemConfidence = itemConfidence * 100;
+        }
+
+        return {
+          plant: item.plant || "Unknown Plant",
+          condition: item.condition || "Unknown",
+          confidence: Math.min(100, Math.max(0, itemConfidence)),
+        };
+      });
+
+      // ----------------------------------------
+      // UNCERTAIN PREDICTION
+      // ----------------------------------------
+      if (data.status === "uncertain") {
+        setResult({
+          uncertain: true,
+          plant: "Unknown",
+          disease: "Unable to confidently identify",
+          confidence,
+          isHealthy: null,
+          healthStatus: "Unknown",
+          topPredictions,
+        });
+
+        return;
+      }
+
+      if (!plantFromAPI || !diseaseFromAPI) {
         throw new Error("Prediction was not returned by the AI model.");
       }
 
@@ -166,40 +214,16 @@ const DiseaseDetection = () => {
         .replace(/\b\w/g, (char) => char.toUpperCase());
 
       // ----------------------------------------
-      // CONFIDENCE
-      // ----------------------------------------
-      let rawConfidence = data.confidence;
-
-      let confidence = Number(rawConfidence);
-
-      if (Number.isNaN(confidence)) {
-        confidence = 0;
-      }
-
-      /*
-        Backend returns confidence as decimal:
-
-        0.0566 -> 5.66%
-
-        If backend ever returns:
-        5.66 -> 5.66%
-
-        We handle both safely.
-      */
-      if (confidence >= 0 && confidence <= 1) {
-        confidence = confidence * 100;
-      }
-
-      // Keep confidence between 0 and 100
-      confidence = Math.min(100, Math.max(0, confidence));
-
-      // ----------------------------------------
-      // SAVE RESULT
+      // SAVE COMPLETE RESULT
       // ----------------------------------------
       setResult({
+        uncertain: false,
         plant,
         disease,
         confidence,
+        isHealthy: data.is_healthy ?? null,
+        healthStatus: data.health_status || "Unknown",
+        topPredictions,
       });
     } catch (err) {
       console.error("FloraScan prediction error:", err);
@@ -600,18 +624,42 @@ const DiseaseDetection = () => {
                   >
 
                     {/* Detection complete */}
-                    <div className="flex items-center gap-4 rounded-2xl bg-amber-50 p-5">
-                      <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-orange-500">
-                        <Leaf className="h-7 w-7 text-white" />
+                    <div className={`flex items-center gap-4 rounded-2xl p-5 ${
+                      result.uncertain
+                        ? "bg-amber-50"
+                        : result.isHealthy
+                        ? "bg-emerald-50"
+                        : "bg-red-50"
+                    }`}>
+                      <div
+                        className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl ${
+                          result.uncertain
+                            ? "bg-amber-500"
+                            : result.isHealthy
+                            ? "bg-emerald-500"
+                            : "bg-red-500"
+                        }`}
+                      >
+                        {result.uncertain ? (
+                          <AlertCircle className="h-7 w-7 text-white" />
+                        ) : result.isHealthy ? (
+                          <CheckCircle2 className="h-7 w-7 text-white" />
+                        ) : (
+                          <AlertCircle className="h-7 w-7 text-white" />
+                        )}
                       </div>
 
                       <div>
                         <h5 className="font-extrabold text-slate-800">
-                          Detection Complete
+                          {result.uncertain
+                            ? "Prediction Uncertain"
+                            : "Detection Complete"}
                         </h5>
 
                         <p className="text-sm text-slate-500">
-                          AI prediction generated successfully
+                          {result.uncertain
+                            ? "The AI could not confidently identify this image."
+                            : "AI prediction generated successfully"}
                         </p>
                       </div>
                     </div>
@@ -627,13 +675,56 @@ const DiseaseDetection = () => {
                       </p>
                     </div>
 
+                    {/* Health Status */}
+                    <div
+                      className={`rounded-2xl p-6 ${
+                        result.healthStatus === "Healthy"
+                          ? "bg-emerald-50"
+                          : result.healthStatus === "Diseased"
+                          ? "bg-red-50"
+                          : "bg-amber-50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="text-xs font-extrabold uppercase tracking-[0.15em] text-slate-400">
+                            Plant Health Status
+                          </p>
+
+                          <p
+                            className={`mt-3 text-2xl font-black ${
+                              result.healthStatus === "Healthy"
+                                ? "text-emerald-600"
+                                : result.healthStatus === "Diseased"
+                                ? "text-red-600"
+                                : "text-amber-600"
+                            }`}
+                          >
+                            {result.healthStatus}
+                          </p>
+                        </div>
+
+                        {result.healthStatus === "Healthy" ? (
+                          <CheckCircle2 className="h-9 w-9 text-emerald-600" />
+                        ) : result.healthStatus === "Diseased" ? (
+                          <AlertCircle className="h-9 w-9 text-red-600" />
+                        ) : (
+                          <Info className="h-9 w-9 text-amber-600" />
+                        )}
+                      </div>
+                    </div>
+
                     {/* Disease */}
                     <div className="rounded-2xl bg-slate-50 p-6">
                       <p className="text-xs font-extrabold uppercase tracking-[0.15em] text-slate-400">
                         Detected Condition
                       </p>
 
-                      <p className="mt-3 text-2xl font-black text-orange-600">
+                      <p
+                        className={`mt-3 text-2xl font-black ${
+                          result.uncertain ? "text-amber-600" : "text-orange-600"
+                        }`}
+                      >
                         {result.disease}
                       </p>
                     </div>
@@ -667,10 +758,57 @@ const DiseaseDetection = () => {
                             duration: 0.8,
                             ease: "easeOut",
                           }}
-                          className="h-full rounded-full bg-emerald-500"
+                          className={`h-full rounded-full ${
+                            result.uncertain ? "bg-amber-500" : "bg-emerald-500"
+                          }`}
                         />
                       </div>
                     </div>
+
+                    {/* Top 3 Predictions */}
+                    {result.topPredictions?.length > 0 && (
+                      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                        <div className="mb-5">
+                          <p className="text-xs font-extrabold uppercase tracking-[0.15em] text-slate-400">
+                            AI Analysis
+                          </p>
+                          <h5 className="mt-2 text-lg font-extrabold text-slate-800">
+                            Top 3 Predictions
+                          </h5>
+                        </div>
+
+                        <div className="space-y-3">
+                          {result.topPredictions.slice(0, 3).map((prediction, index) => (
+                            <div
+                              key={`${prediction.plant}-${prediction.condition}-${index}`}
+                              className="rounded-xl bg-slate-50 p-4"
+                            >
+                              <div className="flex items-center justify-between gap-4">
+                                <div className="min-w-0">
+                                  <p className="font-bold text-slate-800">
+                                    {index + 1}. {prediction.plant}
+                                  </p>
+                                  <p className="mt-1 text-sm text-slate-500">
+                                    {prediction.condition}
+                                  </p>
+                                </div>
+
+                                <span className="shrink-0 text-sm font-extrabold text-emerald-600">
+                                  {prediction.confidence.toFixed(2)}%
+                                </span>
+                              </div>
+
+                              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
+                                <div
+                                  className="h-full rounded-full bg-emerald-500"
+                                  style={{ width: `${prediction.confidence}%` }}
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Disclaimer */}
                     <div className="flex items-start gap-3 rounded-2xl bg-emerald-50 p-5 text-sm leading-6 text-emerald-800">

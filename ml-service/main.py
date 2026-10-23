@@ -3,13 +3,17 @@ import json
 import urllib.request
 from pathlib import Path
 from io import BytesIO
+from contextlib import asynccontextmanager
 
 import numpy as np
 from PIL import Image
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 import ai_edge_litert.interpreter as tflite
+
+
 # ============================================================
 # CONFIG
 # ============================================================
@@ -32,38 +36,13 @@ CLASS_NAMES_PATH = (
     PROJECT_ROOT / "disease_data" / "class_names.json"
 )
 
-
-# ============================================================
-# FASTAPI
-# ============================================================
-
-app = FastAPI(
-    title="FloraScan AI API",
-    description="Lightweight plant disease detection API",
-    version="2.0.0"
-)
-
-
-# ============================================================
-# CORS
-# ============================================================
-
-frontend_url = os.getenv("FRONTEND_URL", "*")
-
-if frontend_url == "*":
-    allowed_origins = ["*"]
-else:
-    allowed_origins = [
-        frontend_url,
-        frontend_url.rstrip("/")
-    ]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Confidence below this value is treated as uncertain.
+# Keep this configurable through Render environment variables.
+PREDICTION_CONFIDENCE_THRESHOLD = float(
+    os.getenv(
+        "PREDICTION_CONFIDENCE_THRESHOLD",
+        "0.50"
+    )
 )
 
 
@@ -84,6 +63,7 @@ def load_class_names():
     global class_names
 
     if not CLASS_NAMES_PATH.exists():
+
         raise FileNotFoundError(
             f"class_names.json not found: "
             f"{CLASS_NAMES_PATH}"
@@ -117,7 +97,9 @@ def load_class_names():
 
         except (ValueError, TypeError):
 
-            class_names = list(data.values())
+            class_names = list(
+                data.values()
+            )
 
     else:
 
@@ -175,7 +157,7 @@ def download_model():
 
 
 # ============================================================
-# LOAD TFLITE MODEL
+# LOAD TFLITE / LITERT MODEL
 # ============================================================
 
 def load_model():
@@ -184,17 +166,22 @@ def load_model():
 
     download_model()
 
-    print("Loading TFLite interpreter...")
+    print("Loading LiteRT/TFLite interpreter...")
 
     interpreter = tflite.Interpreter(
-    model_path=str(MODEL_PATH),
-    num_threads=2
-)
+        model_path=str(MODEL_PATH),
+        num_threads=2
+    )
 
     interpreter.allocate_tensors()
 
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
+    input_details = (
+        interpreter.get_input_details()
+    )
+
+    output_details = (
+        interpreter.get_output_details()
+    )
 
     print(
         "Input shape:",
@@ -202,11 +189,23 @@ def load_model():
     )
 
     print(
+        "Input dtype:",
+        input_details[0]["dtype"]
+    )
+
+    print(
         "Output shape:",
         output_details[0]["shape"]
     )
 
+    print(
+        "Output dtype:",
+        output_details[0]["dtype"]
+    )
+
+    # --------------------------------------------------------
     # Validate output classes
+    # --------------------------------------------------------
 
     output_shape = output_details[0]["shape"]
 
@@ -223,17 +222,17 @@ def load_model():
         )
 
     print(
-        f"TFLite model loaded successfully "
+        f"LiteRT/TFLite model loaded successfully "
         f"with {model_class_count} classes."
     )
 
 
 # ============================================================
-# STARTUP
+# FASTAPI LIFESPAN
 # ============================================================
 
-@app.on_event("startup")
-def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
 
     global interpreter
 
@@ -267,6 +266,52 @@ def startup_event():
 
         interpreter = None
 
+    yield
+
+    print("FloraScan AI API shutting down...")
+
+
+# ============================================================
+# FASTAPI
+# ============================================================
+
+app = FastAPI(
+    title="FloraScan AI API",
+    description="Lightweight plant disease detection API",
+    version="2.3.0",
+    lifespan=lifespan
+)
+
+
+# ============================================================
+# CORS
+# ============================================================
+
+frontend_url = os.getenv(
+    "FRONTEND_URL",
+    "*"
+)
+
+if frontend_url == "*":
+
+    allowed_origins = ["*"]
+
+else:
+
+    allowed_origins = [
+        frontend_url,
+        frontend_url.rstrip("/")
+    ]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ============================================================
 # ROOT
@@ -277,14 +322,15 @@ def root():
 
     return {
         "name": "FloraScan AI API",
-        "version": "2.0.0",
+        "version": "2.3.0",
         "status": "running",
-        "modelLoaded": interpreter is not None
+        "modelLoaded": interpreter is not None,
+        "classCount": len(class_names)
     }
 
 
 # ============================================================
-# HEALTH
+# HEALTH CHECK
 # ============================================================
 
 @app.get("/health")
@@ -302,6 +348,92 @@ def health():
 
 
 # ============================================================
+# FORMAT CLASS NAME
+# ============================================================
+
+def format_prediction(class_name):
+
+    if "___" in class_name:
+
+        plant_name, disease_name = (
+            class_name.split(
+                "___",
+                1
+            )
+        )
+
+    else:
+
+        plant_name = class_name
+        disease_name = class_name
+
+    plant_name = plant_name.replace(
+        "_",
+        " "
+    ).strip()
+
+    disease_name = disease_name.replace(
+        "_",
+        " "
+    ).strip()
+
+    return plant_name, disease_name
+
+
+# ============================================================
+# CHECK HEALTHY
+# ============================================================
+
+def check_health_status(class_name):
+
+    is_healthy = (
+        "healthy" in class_name.lower()
+    )
+
+    health_status = (
+        "Healthy"
+        if is_healthy
+        else "Diseased"
+    )
+
+    return is_healthy, health_status
+
+
+# ============================================================
+# IMAGE PREPROCESSING
+# ============================================================
+
+def preprocess_image(image):
+
+    # Convert to RGB
+    image = image.convert("RGB")
+
+    # Model input size
+    image = image.resize(
+        (128, 128)
+    )
+
+    # IMPORTANT:
+    # Do NOT divide by 255.
+    #
+    # Original FloraScan preprocessing used
+    # raw pixel values from 0-255.
+
+    image_array = np.array(
+        image,
+        dtype=np.float32
+    )
+
+    # Add batch dimension
+    image_array = np.expand_dims(
+        image_array,
+        axis=0
+    )
+
+    return image_array
+
+
+# ============================================================
 # PREDICT
 # ============================================================
 
@@ -310,12 +442,20 @@ async def predict(
     file: UploadFile = File(...)
 ):
 
+    # --------------------------------------------------------
+    # MODEL CHECK
+    # --------------------------------------------------------
+
     if interpreter is None:
 
         raise HTTPException(
             status_code=503,
             detail="Model is not loaded."
         )
+
+    # --------------------------------------------------------
+    # FILE TYPE CHECK
+    # --------------------------------------------------------
 
     allowed_types = {
         "image/jpeg",
@@ -334,9 +474,20 @@ async def predict(
             )
         )
 
+    # --------------------------------------------------------
+    # READ IMAGE
+    # --------------------------------------------------------
+
     try:
 
         image_bytes = await file.read()
+
+        if not image_bytes:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded image is empty."
+            )
 
         image = Image.open(
             BytesIO(image_bytes)
@@ -344,39 +495,29 @@ async def predict(
 
         image = image.convert("RGB")
 
-    except Exception:
+    except HTTPException:
+        raise
+
+    except Exception as e:
 
         raise HTTPException(
             status_code=400,
-            detail="Could not read uploaded image."
+            detail=(
+                "Could not read uploaded image: "
+                + str(e)
+            )
         )
 
     # --------------------------------------------------------
-    # Resize
+    # PREPROCESS
     # --------------------------------------------------------
 
-    image = image.resize(
-        (128, 128)
+    image_array = preprocess_image(
+        image
     )
 
     # --------------------------------------------------------
-    # NumPy
-    # --------------------------------------------------------
-
-    image_array = np.array(
-        image,
-        dtype=np.float32
-    )
-
-    image_array /= 255.0
-
-    image_array = np.expand_dims(
-        image_array,
-        axis=0
-    )
-
-    # --------------------------------------------------------
-    # TFLite input/output
+    # INPUT / OUTPUT DETAILS
     # --------------------------------------------------------
 
     input_details = (
@@ -395,8 +536,22 @@ async def predict(
         output_details[0]["index"]
     )
 
+    expected_dtype = (
+        input_details[0]["dtype"]
+    )
+
     # --------------------------------------------------------
-    # Prediction
+    # MATCH MODEL DTYPE
+    # --------------------------------------------------------
+
+    if image_array.dtype != expected_dtype:
+
+        image_array = image_array.astype(
+            expected_dtype
+        )
+
+    # --------------------------------------------------------
+    # RUN MODEL
     # --------------------------------------------------------
 
     try:
@@ -408,71 +563,187 @@ async def predict(
 
         interpreter.invoke()
 
-        predictions = interpreter.get_tensor(
-            output_index
+        predictions = (
+            interpreter.get_tensor(
+                output_index
+            )
         )
 
     except Exception as e:
 
         raise HTTPException(
             status_code=500,
-            detail=f"Prediction failed: {str(e)}"
-        )
-
-    # --------------------------------------------------------
-    # Main prediction
-    # --------------------------------------------------------
-
-    probabilities = np.asarray(
-        predictions[0]
-    )
-
-    predicted_index = int(
-        np.argmax(probabilities)
-    )
-
-    confidence = float(
-        probabilities[predicted_index]
-    )
-
-    predicted_class = class_names[
-        predicted_index
-    ]
-
-    # --------------------------------------------------------
-    # Plant + condition
-    # --------------------------------------------------------
-
-    if "___" in predicted_class:
-
-        plant_name, disease_name = (
-            predicted_class.split(
-                "___",
-                1
+            detail=(
+                f"Prediction failed: {str(e)}"
             )
         )
 
-    else:
+    # --------------------------------------------------------
+    # GET PREDICTIONS
+    # --------------------------------------------------------
 
-        plant_name = predicted_class
-        disease_name = predicted_class
-
-    plant_name = plant_name.replace(
-        "_",
-        " "
+    probabilities = np.asarray(
+        predictions[0],
+        dtype=np.float32
     )
 
-    disease_name = disease_name.replace(
-        "_",
-        " "
+    probabilities = np.nan_to_num(
+        probabilities,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0
     )
 
     # --------------------------------------------------------
-    # Response
+    # VALIDATE CLASS COUNT
+    # --------------------------------------------------------
+
+    if len(probabilities) != len(class_names):
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Model returned "
+                f"{len(probabilities)} predictions "
+                f"but there are "
+                f"{len(class_names)} class names."
+            )
+        )
+
+    # --------------------------------------------------------
+    # TOP 3
+    # --------------------------------------------------------
+
+    top_indices = np.argsort(
+        probabilities
+    )[-3:][::-1]
+
+    top_predictions = []
+
+    for rank, index in enumerate(
+        top_indices,
+        start=1
+    ):
+
+        index = int(index)
+
+        confidence = float(
+            probabilities[index]
+        )
+
+        predicted_class = (
+            class_names[index]
+        )
+
+        plant_name, disease_name = (
+            format_prediction(
+                predicted_class
+            )
+        )
+
+        prediction_item = {
+
+            "rank": rank,
+
+            "plant": plant_name,
+
+            "condition": disease_name,
+
+            "confidence": confidence
+        }
+
+        top_predictions.append(
+            prediction_item
+        )
+
+    # --------------------------------------------------------
+    # BEST PREDICTION
+    # --------------------------------------------------------
+
+    best_index = int(
+        np.argmax(probabilities)
+    )
+
+    best_class = (
+        class_names[best_index]
+    )
+
+    best_confidence = float(
+        probabilities[best_index]
+    )
+
+    best_plant, best_condition = (
+        format_prediction(
+            best_class
+        )
+    )
+
+    # --------------------------------------------------------
+    # HEALTH STATUS
+    # --------------------------------------------------------
+
+    is_healthy, health_status = (
+        check_health_status(
+            best_class
+        )
+    )
+
+    # --------------------------------------------------------
+    # UNCERTAIN PREDICTION
+    # --------------------------------------------------------
+    #
+    # Example:
+    # Tulsi image is outside the model's known classes.
+    #
+    # If model confidence is only 6%, don't confidently
+    # tell the user it is Tomato.
+    #
+    # --------------------------------------------------------
+
+    if (
+        best_confidence
+        < PREDICTION_CONFIDENCE_THRESHOLD
+    ):
+
+        return {
+
+            "status": "uncertain",
+
+            "message": (
+                "Unable to confidently identify "
+                "a plant disease from this image."
+            ),
+
+            "plant": None,
+
+            "condition": None,
+
+            "confidence": best_confidence,
+
+            "is_healthy": None,
+
+            "health_status": "Unknown",
+
+            "top_predictions": top_predictions
+        }
+
+    # --------------------------------------------------------
+    # SUCCESS RESPONSE
     # --------------------------------------------------------
 
     return {
-        "plant": plant_name,
-        "condition": disease_name,
-        "confidence": confidence
+
+        "status": "success",
+
+        "plant": best_plant,
+
+        "condition": best_condition,
+
+        "confidence": best_confidence,
+
+        "is_healthy": is_healthy,
+
+        "health_status": health_status,
+
+        "top_predictions": top_predictions
     }
